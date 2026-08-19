@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frog-rl"
+version = "0.1.0"
+description = "GPU-accelerated reinforcement learning algorithms for Frog Lab"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "Frog Lab" }]
+keywords = ["reinforcement-learning", "robotics", "amp", "wasabi"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "torch>=2.6.0",
+    "tensordict>=0.7.0",
+    "numpy>=1.16.4",
+    "tensorboard",
+    "GitPython",
+    "onnx",
+    "onnxscript>=0.5.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/Green-Fr0g/frog_lab"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["frog_rl*"]
+
+[tool.pyright]
+include = ["frog_rl"]
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+reportMissingImports = "none"
+reportMissingModuleSource = "none"
