@@ -42,7 +42,7 @@ class AMPPPO(PPO):
         super().__init__(policy, device=device, **ppo_kwargs)
 
         self.amp_cfg = dict(amp_cfg)
-        self.expert_state_key = self.amp_cfg["expert_state_key"]
+        self.amp_state_key = self.amp_cfg["amp_state_key"]
         self.state_dim = int(self.amp_cfg["state_dim"])
         self._current_amp_state: torch.Tensor | None = None
 
@@ -58,7 +58,7 @@ class AMPPPO(PPO):
         expert_state_dim = getattr(self.amp_data, "state_dim", None)
         if expert_state_dim is not None and expert_state_dim != self.state_dim:
             raise ValueError(
-                f"AMP expert state dimension mismatch: observation '{self.expert_state_key}' has "
+                f"AMP expert state dimension mismatch: observation '{self.amp_state_key}' has "
                 f"dimension {self.state_dim}, motion loader has {expert_state_dim}."
             )
 
@@ -122,14 +122,14 @@ class AMPPPO(PPO):
         alg_cfg = resolve_symmetry_config(alg_cfg, env)
 
         amp_cfg = deepcopy(alg_cfg.pop("amp_cfg"))
-        expert_state_key = amp_cfg["expert_state_key"]
-        if expert_state_key not in obs:
+        amp_state_key = amp_cfg["amp_state_key"]
+        if amp_state_key not in obs:
             raise ValueError(
-                f"AMPPPO requires the '{expert_state_key}' observation group, but it is not present. "
+                f"AMPPPO requires the '{amp_state_key}' observation group, but it is not present. "
                 f"Available observations: {list(obs.keys())}"
             )
-        amp_cfg["expert_state_key"] = expert_state_key
-        amp_cfg["state_dim"] = int(obs[expert_state_key].shape[-1])
+        amp_cfg["amp_state_key"] = amp_state_key
+        amp_cfg["state_dim"] = int(obs[amp_state_key].shape[-1])
         amp_cfg["discriminator_input_dim"] = 2 * amp_cfg["state_dim"]
 
         motion_loader_kwargs = dict(amp_cfg["motion_loader_kwargs"])
@@ -144,7 +144,7 @@ class AMPPPO(PPO):
         return alg
 
     def act(self, obs: TensorDict) -> torch.Tensor:
-        self._current_amp_state = obs[self.expert_state_key].detach().clone()
+        self._current_amp_state = obs[self.amp_state_key].detach().clone()
         return super().act(obs)
 
     def process_env_step(
@@ -153,12 +153,12 @@ class AMPPPO(PPO):
         if self._current_amp_state is None:
             raise RuntimeError("AMPPPO.process_env_step() must be called after act().")
 
-        next_amp_state = obs[self.expert_state_key].clone()
+        next_amp_state = obs[self.amp_state_key].clone()
         reset_env_ids = (dones > 0).nonzero(as_tuple=False).flatten()
         if len(reset_env_ids) > 0:
             next_amp_state[reset_env_ids] = self._current_amp_state[reset_env_ids]
 
-        self.amp_storage.insert(self._current_amp_state, next_amp_state)
+        self.amp_storage.add(self._current_amp_state, next_amp_state)
         amp_reward, _ = self.discriminator.predict_amp_reward(
             self._current_amp_state, next_amp_state, rewards, normalizer=self.amp_normalizer
         )
@@ -177,8 +177,8 @@ class AMPPPO(PPO):
 
         mini_batch_size = self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches
         num_updates = self.num_learning_epochs * self.num_mini_batches
-        amp_policy_generator = self.amp_storage.feed_forward_generator(num_updates, mini_batch_size)
-        amp_expert_generator = self.amp_data.feed_forward_generator(num_updates, mini_batch_size)
+        amp_policy_generator = self.amp_storage.mini_batch_generator(num_updates, mini_batch_size)
+        amp_expert_generator = self.amp_data.mini_batch_generator(num_updates, mini_batch_size)
 
         for (policy_state, policy_next_state), (expert_state, expert_next_state) in zip(
             amp_policy_generator, amp_expert_generator

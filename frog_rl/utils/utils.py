@@ -355,8 +355,8 @@ class Normalizer(RunningMeanStd):
         return torch.clamp((input - mean_torch) / std_torch, -self.clip_obs, self.clip_obs)
 
     def update_normalizer(self, rollouts, expert_loader):
-        policy_data_generator = rollouts.feed_forward_generator_amp(None, mini_batch_size=expert_loader.batch_size)
-        expert_data_generator = expert_loader.dataset.feed_forward_generator_amp(expert_loader.batch_size)
+        policy_data_generator = rollouts.mini_batch_generator(None, mini_batch_size=expert_loader.batch_size)
+        expert_data_generator = expert_loader.dataset.mini_batch_generator(expert_loader.batch_size)
 
         for expert_batch, policy_batch in zip(expert_data_generator, policy_data_generator):
             self.update(torch.vstack(tuple(policy_batch) + tuple(expert_batch)).cpu().numpy())
