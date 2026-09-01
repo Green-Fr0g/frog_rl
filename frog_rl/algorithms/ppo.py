@@ -8,13 +8,15 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from copy import deepcopy
 from itertools import chain
 from tensordict import TensorDict
 
 from frog_rl.modules import ActorCritic, ActorCriticMoE, ActorCriticRecurrent
 from frog_rl.modules.rnd import RandomNetworkDistillation
+from frog_rl.modules import resolve_rnd_config, resolve_symmetry_config
 from frog_rl.storage import RolloutStorage
-from frog_rl.utils import string_to_callable
+from frog_rl.utils import resolve_obs_groups, string_to_callable
 
 
 class PPO:
@@ -139,6 +141,38 @@ class PPO:
             actions_shape,
             self.device,
         )
+
+    @staticmethod
+    def construct_algorithm(
+        obs: TensorDict, env, cfg: dict, device: str, multi_gpu_cfg: dict | None = None
+    ) -> "PPO":
+        """Construct a PPO algorithm from a runner configuration."""
+        alg_cfg = deepcopy(cfg["algorithm"])
+        policy_cfg = deepcopy(cfg["policy"])
+        obs_groups = deepcopy(cfg.get("obs_groups", {}))
+
+        if cfg.get("empirical_normalization") is not None:
+            if policy_cfg.get("actor_obs_normalization") is None:
+                policy_cfg["actor_obs_normalization"] = cfg["empirical_normalization"]
+            if policy_cfg.get("critic_obs_normalization") is None:
+                policy_cfg["critic_obs_normalization"] = cfg["empirical_normalization"]
+
+        default_sets = ["critic"]
+        if alg_cfg.get("rnd_cfg") is not None:
+            default_sets.append("rnd_state")
+        obs_groups = resolve_obs_groups(obs, obs_groups, default_sets)
+        alg_cfg = resolve_rnd_config(alg_cfg, obs, obs_groups, env)
+        alg_cfg = resolve_symmetry_config(alg_cfg, env)
+
+        actor_critic_class = eval(policy_cfg.pop("class_name"))
+        actor_critic: ActorCritic | ActorCriticMoE | ActorCriticRecurrent = actor_critic_class(
+            obs, obs_groups, env.num_actions, **policy_cfg
+        ).to(device)
+
+        alg_cfg.pop("class_name", None)
+        alg = PPO(actor_critic, device=device, multi_gpu_cfg=multi_gpu_cfg, **alg_cfg)
+        alg.init_storage("rl", env.num_envs, cfg["num_steps_per_env"], obs, [env.num_actions])
+        return alg
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         if self.policy.is_recurrent:
@@ -458,3 +492,41 @@ class PPO:
                 param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
                 # Update the offset for the next parameter
                 offset += numel
+
+    def save(self) -> dict:
+        """Serialize the PPO state for checkpointing."""
+        saved_dict = {
+            "model_state_dict": self.policy.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+        }
+        if self.rnd:
+            saved_dict["rnd_state_dict"] = self.rnd.state_dict()
+            saved_dict["rnd_optimizer_state_dict"] = self.rnd_optimizer.state_dict()
+        return saved_dict
+
+    def load(self, loaded_dict: dict, load_optimizer: bool = True, strict: bool = True) -> bool:
+        """Load PPO state from a checkpoint dictionary."""
+        if "model_state_dict" not in loaded_dict:
+            raise KeyError(f"Checkpoint has no recognized PPO model keys. Found: {list(loaded_dict.keys())}")
+
+        self.policy.load_state_dict(loaded_dict["model_state_dict"], strict=strict)
+        if self.rnd and "rnd_state_dict" in loaded_dict:
+            self.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
+
+        if load_optimizer and "optimizer_state_dict" in loaded_dict:
+            self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
+            if self.rnd and "rnd_optimizer_state_dict" in loaded_dict:
+                self.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+        return True
+
+    def train_mode(self) -> None:
+        """Set modules to train mode."""
+        self.policy.train()
+        if self.rnd:
+            self.rnd.train()
+
+    def eval_mode(self) -> None:
+        """Set modules to evaluation mode."""
+        self.policy.eval()
+        if self.rnd:
+            self.rnd.eval()

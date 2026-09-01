@@ -15,10 +15,6 @@ import numpy as np
 from tensordict import TensorDict,Tuple
 from typing import Callable
 
-from __future__ import annotations
-
-
-
 def resolve_nn_activation(act_name: str) -> torch.nn.Module:
     """Resolve the activation function from the name.
 
