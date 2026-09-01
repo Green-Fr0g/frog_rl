@@ -42,7 +42,7 @@ class AMPPPO(PPO):
         super().__init__(policy, device=device, **ppo_kwargs)
 
         self.amp_cfg = dict(amp_cfg)
-        self.expert_state_key = self.amp_cfg.get("expert_state_key", "amp_state")
+        self.expert_state_key = self.amp_cfg["expert_state_key"]
         self.state_dim = int(self.amp_cfg["state_dim"])
         self._current_amp_state: torch.Tensor | None = None
 
@@ -51,8 +51,6 @@ class AMPPPO(PPO):
 
         motion_loader_class = string_to_callable(self.amp_cfg["motion_loader_class_name"])
         motion_loader_kwargs = dict(self.amp_cfg.get("motion_loader_kwargs", {}))
-        if "motion_files" not in motion_loader_kwargs and "amp_motion_files" in self.amp_cfg:
-            motion_loader_kwargs["motion_files"] = self.amp_cfg["amp_motion_files"]
         motion_loader_kwargs.setdefault("device", self.device)
         motion_loader_kwargs.setdefault("time_between_frames", self.amp_cfg.get("time_between_frames", 0.02))
 
@@ -124,7 +122,7 @@ class AMPPPO(PPO):
         alg_cfg = resolve_symmetry_config(alg_cfg, env)
 
         amp_cfg = deepcopy(alg_cfg.pop("amp_cfg"))
-        expert_state_key = amp_cfg.get("expert_state_key", "amp_state")
+        expert_state_key = amp_cfg["expert_state_key"]
         if expert_state_key not in obs:
             raise ValueError(
                 f"AMPPPO requires the '{expert_state_key}' observation group, but it is not present. "
@@ -134,9 +132,7 @@ class AMPPPO(PPO):
         amp_cfg["state_dim"] = int(obs[expert_state_key].shape[-1])
         amp_cfg["discriminator_input_dim"] = 2 * amp_cfg["state_dim"]
 
-        motion_loader_kwargs = dict(amp_cfg.get("motion_loader_kwargs", {}))
-        if "motion_files" not in motion_loader_kwargs and "amp_motion_files" in amp_cfg:
-            motion_loader_kwargs["motion_files"] = amp_cfg["amp_motion_files"]
+        motion_loader_kwargs = dict(amp_cfg["motion_loader_kwargs"])
         amp_cfg["motion_loader_kwargs"] = motion_loader_kwargs
 
         policy_class = eval(policy_cfg.pop("class_name"))
