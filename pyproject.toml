@@ -41,9 +41,6 @@ Issues = "https://github.com/Green-Fr0g/frog_rl/issues"
 where = ["."]
 include = ["frog_rl*"]
 
-[tool.setuptools.package-data]
-"frog_rl" = ["config/*", "licenses/*"]
-
 [tool.pyright]
 include = ["frog_rl"]
 typeCheckingMode = "basic"

@@ -16,7 +16,13 @@ from tensordict import TensorDict
 import frog_rl
 from frog_rl.algorithms import PPO
 from frog_rl.env import VecEnv
-from frog_rl.modules import ActorCritic, ActorCriticRecurrent, resolve_rnd_config, resolve_symmetry_config
+from frog_rl.modules import (
+    ActorCritic,
+    ActorCriticMoE,
+    ActorCriticRecurrent,
+    resolve_rnd_config,
+    resolve_symmetry_config,
+)
 from frog_rl.utils import resolve_obs_groups, store_code_state
 
 
@@ -414,7 +420,7 @@ class OnPolicyRunner:
 
         # Initialize the policy
         actor_critic_class = eval(self.policy_cfg.pop("class_name"))
-        actor_critic: ActorCritic | ActorCriticRecurrent = actor_critic_class(
+        actor_critic: ActorCritic | ActorCriticMoE | ActorCriticRecurrent = actor_critic_class(
             obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 

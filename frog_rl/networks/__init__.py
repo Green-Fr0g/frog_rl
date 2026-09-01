@@ -5,11 +5,15 @@
 
 """Definitions for components of modules."""
 
+from .cnn import CNN
 from .memory import HiddenState, Memory
+from .moe import MoE
 from .mlp import MLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 
 __all__ = [
+    "CNN",
+    "MoE",
     "MLP",
     "EmpiricalDiscountedVariationNormalization",
     "EmpiricalNormalization",
