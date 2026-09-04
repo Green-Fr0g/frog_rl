@@ -183,10 +183,11 @@ class AMPPPO(PPO):
         for (policy_state, policy_next_state), (expert_state, expert_next_state) in zip(
             amp_policy_generator, amp_expert_generator
         ):
-            policy_state_norm = self.amp_normalizer(policy_state)
-            policy_next_state_norm = self.amp_normalizer(policy_next_state)
-            expert_state_norm = self.amp_normalizer(expert_state)
-            expert_next_state_norm = self.amp_normalizer(expert_next_state)
+            with torch.no_grad():
+                policy_state_norm = self.amp_normalizer(policy_state)
+                policy_next_state_norm = self.amp_normalizer(policy_next_state)
+                expert_state_norm = self.amp_normalizer(expert_state)
+                expert_next_state_norm = self.amp_normalizer(expert_next_state)
 
             policy_d = self.discriminator(torch.cat([policy_state_norm, policy_next_state_norm], dim=-1))
             expert_d = self.discriminator(torch.cat([expert_state_norm, expert_next_state_norm], dim=-1))

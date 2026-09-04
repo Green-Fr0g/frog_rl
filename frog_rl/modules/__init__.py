@@ -13,7 +13,9 @@ from .rnd import RandomNetworkDistillation, resolve_rnd_config
 from .student_teacher import StudentTeacher
 from .student_teacher_recurrent import StudentTeacherRecurrent
 from .symmetry import resolve_symmetry_config
+from .transformer import Transformer
 from .wasabi_discriminator import WasabiDiscriminator
+from .vae import VAE
 
 from .discriminator import Discriminator
 
@@ -27,6 +29,8 @@ __all__ = [
     "StudentTeacherRecurrent",
     "resolve_rnd_config",
     "resolve_symmetry_config",
+    "Transformer",
     "WasabiDiscriminator",
     "Discriminator",
+    "VAE",
 ]
