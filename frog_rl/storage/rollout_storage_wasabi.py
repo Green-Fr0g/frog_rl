@@ -6,6 +6,7 @@ from typing import Generator
 
 import torch
 
+
 class WasabiStorage:
     """Store one PPO rollout for discriminator training."""
 
@@ -32,7 +33,7 @@ class WasabiStorage:
         self.step += 1
 
     def states(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return all valid policy and reference states as flattened tensors."""
+        """Return all valid current and reference states as flattened tensors."""
         return (
             self.current_states[: self.step].flatten(0, 1),
             self.reference_states[: self.step].flatten(0, 1),

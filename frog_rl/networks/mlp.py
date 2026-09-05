@@ -1,8 +1,7 @@
-# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-
 
 from __future__ import annotations
 
@@ -10,11 +9,11 @@ import torch
 import torch.nn as nn
 from functools import reduce
 
-from frog_rl.utils import get_param, resolve_nn_activation
+from frog_rl.utils import resolve_nn_activation
 
 
 class MLP(nn.Sequential):
-    """Multi-Layer Perceptron.
+    """Multi-layer perceptron.
 
     The MLP network is a sequence of linear layers and activation functions. The last layer is a linear layer that
     outputs the desired dimension unless the last activation function is specified.
@@ -27,8 +26,8 @@ class MLP(nn.Sequential):
     def __init__(
         self,
         input_dim: int,
-        output_dim: int | tuple[int, ...] | list[int],
-        hidden_dims: tuple[int, ...] | list[int],
+        output_dim: int | tuple[int] | list[int],
+        hidden_dims: tuple[int] | list[int],
         activation: str = "elu",
         last_activation: str | None = None,
     ) -> None:
@@ -86,13 +85,27 @@ class MLP(nn.Sequential):
         Args:
             scales: Scale factor for the weights.
         """
+
+        def get_scale(idx: int) -> float:
+            """Get the scale factor for the weights of the MLP.
+
+            Args:
+                idx: Index of the layer.
+            """
+            return scales[idx] if isinstance(scales, (list, tuple)) else scales
+
+        # Initialize the weights
         for idx, module in enumerate(self):
             if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=get_param(scales, idx))
+                nn.init.orthogonal_(module.weight, gain=get_scale(idx))
                 nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass of the MLP."""
+        """Forward pass of the MLP.
+
+        Args:
+            x: Input tensor.
+        """
         for layer in self:
             x = layer(x)
         return x

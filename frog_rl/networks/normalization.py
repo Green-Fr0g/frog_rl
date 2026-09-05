@@ -1,10 +1,9 @@
-# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Copyright (c) 2020 Preferred Networks, Inc.
-
 
 from __future__ import annotations
 
@@ -15,7 +14,7 @@ from torch import nn
 class EmpiricalNormalization(nn.Module):
     """Normalize mean and variance of values based on empirical values."""
 
-    def __init__(self, shape: int | tuple[int, ...] | list[int], eps: float = 1e-2, until: int | None = None) -> None:
+    def __init__(self, shape: int | tuple[int] | list[int], eps: float = 1e-2, until: int | None = None) -> None:
         """Initialize EmpiricalNormalization module.
 
         .. note:: The normalization parameters are computed over the whole batch, not for each environment separately.
@@ -35,12 +34,10 @@ class EmpiricalNormalization(nn.Module):
 
     @property
     def mean(self) -> torch.Tensor:
-        """Return the current running mean."""
-        return self._mean.squeeze(0).clone()  # type: ignore
+        return self._mean.squeeze(0).clone()
 
     @property
     def std(self) -> torch.Tensor:
-        """Return the current running standard deviation."""
         return self._std.squeeze(0).clone()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -80,20 +77,14 @@ class EmpiricalDiscountedVariationNormalization(nn.Module):
     """
 
     def __init__(
-        self,
-        shape: int | tuple[int, ...] | list[int],
-        eps: float = 1e-2,
-        gamma: float = 0.99,
-        until: int | None = None,
+        self, shape: int | tuple[int] | list[int], eps: float = 1e-2, gamma: float = 0.99, until: int | None = None
     ) -> None:
-        """Initialize discounted-reward normalization with running moments."""
         super().__init__()
 
         self.emp_norm = EmpiricalNormalization(shape, eps, until)
         self.disc_avg = _DiscountedAverage(gamma)
 
     def forward(self, rew: torch.Tensor) -> torch.Tensor:
-        """Normalize rewards using the running std of discounted returns."""
         if self.training:
             # Update discounted rewards
             avg = self.disc_avg.update(rew)
@@ -101,8 +92,8 @@ class EmpiricalDiscountedVariationNormalization(nn.Module):
             self.emp_norm.update(avg)
 
         # Normalize rewards with the empirical std
-        if self.emp_norm._std > 0:  # type: ignore
-            return rew / self.emp_norm._std  # type: ignore
+        if self.emp_norm._std > 0:
+            return rew / self.emp_norm._std
         else:
             return rew
 
@@ -118,12 +109,10 @@ class _DiscountedAverage:
     """
 
     def __init__(self, gamma: float) -> None:
-        """Initialize discounted accumulation with a fixed discount factor."""
         self.avg = None
         self.gamma = gamma
 
     def update(self, rew: torch.Tensor) -> torch.Tensor:
-        """Update and return the discounted running average."""
         if self.avg is None:
             self.avg = rew
         else:

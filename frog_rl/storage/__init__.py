@@ -1,12 +1,14 @@
-# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Storage for the learning algorithms."""
+"""Implementation of transitions storage for RL-agent."""
 
-from .amp_storage import AMPStorage
-from .rollout_storage import RolloutStorage
-from .wasabi_storage import WasabiStorage
+from .rollout_storage import RolloutStorage 
+from .rollout_storage_amp import AMPStorage
 
-__all__ = ["AMPStorage", "RolloutStorage", "WasabiStorage"]
+__all__ = [
+    "RolloutStorage",
+    "AMPStorage"
+    ]

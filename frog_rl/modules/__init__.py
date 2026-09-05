@@ -1,25 +1,36 @@
-# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Building blocks for neural models."""
+"""Definitions for neural-network components for RL-agents."""
 
-from .cnn import CNN
-from .distribution import BetaDistribution, Distribution, GaussianDistribution, HeteroscedasticGaussianDistribution
-from .mlp import MLP
-from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
-from .rnn import RNN, HiddenState
+from .actor_critic import ActorCritic
+from .actor_critic_moe import ActorCriticMoE
+from .actor_critic_recurrent import ActorCriticRecurrent
+from .cnn_encoder import CNNEncoder
+from .rnd import RandomNetworkDistillation, resolve_rnd_config
+from .student_teacher import StudentTeacher
+from .student_teacher_recurrent import StudentTeacherRecurrent
+from .symmetry import resolve_symmetry_config
+from .transformer import Transformer
+from .wasabi_discriminator import WasabiDiscriminator
+from .vae import VAE
+
+from .discriminator import Discriminator
 
 __all__ = [
-    "CNN",
-    "MLP",
-    "RNN",
-    "BetaDistribution",
-    "Distribution",
-    "EmpiricalDiscountedVariationNormalization",
-    "EmpiricalNormalization",
-    "GaussianDistribution",
-    "HeteroscedasticGaussianDistribution",
-    "HiddenState",
+    "ActorCritic",
+    "ActorCriticMoE",
+    "ActorCriticRecurrent",
+    "CNNEncoder",
+    "RandomNetworkDistillation",
+    "StudentTeacher",
+    "StudentTeacherRecurrent",
+    "resolve_rnd_config",
+    "resolve_symmetry_config",
+    "Transformer",
+    "WasabiDiscriminator",
+    "Discriminator",
+    "VAE",
 ]

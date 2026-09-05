@@ -9,8 +9,11 @@ from __future__ import annotations
 import math
 import torch
 from torch import nn as nn
+from typing import TypeVar
 
-from frog_rl.utils import get_param, resolve_nn_activation
+from frog_rl.utils import resolve_nn_activation
+
+T = TypeVar("T")
 
 
 class CNN(nn.Sequential):
@@ -64,9 +67,9 @@ class CNN(nn.Sequential):
         last_dim = input_dim
         for idx in range(len(output_channels)):
             # Get parameters for the current layer
-            k = get_param(kernel_size, idx)
-            s = get_param(stride, idx)
-            d = get_param(dilation, idx)
+            k = _get_param(kernel_size, idx)
+            s = _get_param(stride, idx)
+            d = _get_param(dilation, idx)
             p = (
                 _compute_padding(last_dim, k, s, d)
                 if padding in ["zeros", "reflect", "replicate", "circular"]
@@ -87,7 +90,7 @@ class CNN(nn.Sequential):
             )
 
             # Append normalization layer if specified
-            n = get_param(norm, idx)
+            n = _get_param(norm, idx)
             if n == "none":
                 pass
             elif n == "batch":
@@ -104,12 +107,13 @@ class CNN(nn.Sequential):
             layers.append(activation_function)
 
             # Apply max pooling if specified
-            if get_param(max_pool, idx):
+            use_max_pool = _get_param(max_pool, idx)
+            if use_max_pool:
                 layers.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
 
             # Update last channels and dimensions
             last_channels = output_channels[idx]
-            last_dim = _compute_output_dim(last_dim, k, s, d, p, is_max_pool=get_param(max_pool, idx))
+            last_dim = _compute_output_dim(last_dim, k, s, d, p, is_max_pool=use_max_pool)
 
         # Apply global pooling if specified
         if global_pool == "none":
@@ -161,21 +165,63 @@ class CNN(nn.Sequential):
         return x
 
 
-def _compute_padding(input_hw: tuple[int, int], kernel: int, stride: int, dilation: int) -> tuple[int, int]:
+def _get_param(param: T | tuple[T, ...] | list[T], idx: int) -> T:
+    """Return the indexed value for per-layer parameters, or the scalar value for shared parameters."""
+    if isinstance(param, (tuple, list)):
+        return param[idx]
+    return param
+
+
+def _to_pair(value: int | tuple[int, int] | list[int]) -> tuple[int, int]:
+    """Convert an integer or two-element sequence to a height/width pair."""
+    if isinstance(value, int):
+        return (value, value)
+    if len(value) != 2:
+        raise ValueError(f"Expected an int or a two-element sequence, got: {value}")
+    return (int(value[0]), int(value[1]))
+
+
+def _compute_padding(
+    input_hw: tuple[int, int],
+    kernel: int | tuple[int, int] | list[int],
+    stride: int | tuple[int, int] | list[int],
+    dilation: int | tuple[int, int] | list[int],
+) -> tuple[int, int]:
     """Compute the optimal padding for the current layer.
 
     Reference: https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
     """
-    h = math.ceil((stride * math.floor(input_hw[0] / stride) - input_hw[0] - stride + dilation * (kernel - 1) + 1) / 2)
-    w = math.ceil((stride * math.floor(input_hw[1] / stride) - input_hw[1] - stride + dilation * (kernel - 1) + 1) / 2)
+    kernel_h, kernel_w = _to_pair(kernel)
+    stride_h, stride_w = _to_pair(stride)
+    dilation_h, dilation_w = _to_pair(dilation)
+    h = math.ceil(
+        (
+            stride_h * math.floor(input_hw[0] / stride_h)
+            - input_hw[0]
+            - stride_h
+            + dilation_h * (kernel_h - 1)
+            + 1
+        )
+        / 2
+    )
+    w = math.ceil(
+        (
+            stride_w * math.floor(input_hw[1] / stride_w)
+            - input_hw[1]
+            - stride_w
+            + dilation_w * (kernel_w - 1)
+            + 1
+        )
+        / 2
+    )
     return (h, w)
 
 
 def _compute_output_dim(
     input_hw: tuple[int, int],
-    kernel: int,
-    stride: int,
-    dilation: int,
+    kernel: int | tuple[int, int] | list[int],
+    stride: int | tuple[int, int] | list[int],
+    dilation: int | tuple[int, int] | list[int],
     padding: tuple[int, int],
     is_max_pool: bool = False,
 ) -> tuple[int, int]:
@@ -183,8 +229,11 @@ def _compute_output_dim(
 
     Reference: https://pytorch.org/docs/stable/generated/torch.nn.Conv2d.html
     """
-    h = math.floor((input_hw[0] + 2 * padding[0] - dilation * (kernel - 1) - 1) / stride + 1)
-    w = math.floor((input_hw[1] + 2 * padding[1] - dilation * (kernel - 1) - 1) / stride + 1)
+    kernel_h, kernel_w = _to_pair(kernel)
+    stride_h, stride_w = _to_pair(stride)
+    dilation_h, dilation_w = _to_pair(dilation)
+    h = math.floor((input_hw[0] + 2 * padding[0] - dilation_h * (kernel_h - 1) - 1) / stride_h + 1)
+    w = math.floor((input_hw[1] + 2 * padding[1] - dilation_w * (kernel_w - 1) - 1) / stride_w + 1)
 
     if is_max_pool:
         h = math.ceil(h / 2)

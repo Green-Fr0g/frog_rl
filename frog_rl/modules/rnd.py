@@ -1,8 +1,7 @@
-# Copyright (c) 2021-2026, ETH Zurich and NVIDIA CORPORATION
+# Copyright (c) 2021-2025, ETH Zurich and NVIDIA CORPORATION
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
-
 
 from __future__ import annotations
 
@@ -12,15 +11,14 @@ from tensordict import TensorDict
 from typing import Any, NoReturn
 
 from frog_rl.env import VecEnv
-from frog_rl.modules import MLP, EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
+from frog_rl.networks import MLP, EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
 
 
 class RandomNetworkDistillation(nn.Module):
-    """Implementation of Random Network Distillation (RND).
+    """Implementation of Random Network Distillation (RND) [1].
 
     References:
-        - Schwarke et al. "Curiosity-Driven Learning of Joint Locomotion and Manipulation Tasks." CoRL (2023).
-        - Burda et al. "Exploration by Random Network Distillation." arXiv preprint arXiv:1810.12894 (2018).
+        .. [1] Burda, Yuri, et al. "Exploration by Random Network Distillation." arXiv preprint arXiv:1810.12894 (2018).
     """
 
     def __init__(
@@ -28,15 +26,14 @@ class RandomNetworkDistillation(nn.Module):
         num_states: int,
         obs_groups: dict,
         num_outputs: int,
-        predictor_hidden_dims: tuple[int, ...] | list[int],
-        target_hidden_dims: tuple[int, ...] | list[int],
+        predictor_hidden_dims: tuple[int] | list[int],
+        target_hidden_dims: tuple[int] | list[int],
         activation: str = "elu",
+        weight: float = 0.0,
         state_normalization: bool = False,
         reward_normalization: bool = False,
-        weight: float = 0.0,
-        weight_schedule: dict | None = None,
-        learning_rate: float = 1e-3,
         device: str = "cpu",
+        weight_schedule: dict | None = None,
     ) -> None:
         """Initialize the RND module.
 
@@ -54,9 +51,10 @@ class RandomNetworkDistillation(nn.Module):
             predictor_hidden_dims: List of hidden dimensions of the predictor network.
             target_hidden_dims: List of hidden dimensions of the target network.
             activation: Activation function.
+            weight: Scaling factor of the intrinsic reward.
             state_normalization: Whether to normalize the input state.
             reward_normalization: Whether to normalize the intrinsic reward.
-            weight: Scaling factor of the intrinsic reward.
+            device: Device to use.
             weight_schedule: Type of schedule to use for the RND weight parameter.
                 It is a dictionary with the following keys:
 
@@ -74,8 +72,6 @@ class RandomNetworkDistillation(nn.Module):
                 - "initial_step": Step at which the weight parameter is set to the initial value.
                 - "final_step": Step at which the weight parameter is set to the final value.
                 - "final_value": Final value of the weight parameter.
-            learning_rate: Learning rate for the RND optimizer.
-            device: Device to use.
         """
         # Initialize parent class
         super().__init__()
@@ -91,15 +87,13 @@ class RandomNetworkDistillation(nn.Module):
 
         # Normalization of input gates
         if state_normalization:
-            self.state_normalizer = EmpiricalNormalization(shape=[self.num_states], until=int(1.0e8)).to(self.device)
+            self.state_normalizer = EmpiricalNormalization(shape=[self.num_states], until=1.0e8).to(self.device)
         else:
             self.state_normalizer = torch.nn.Identity()
 
         # Normalization of intrinsic reward
         if reward_normalization:
-            self.reward_normalizer = EmpiricalDiscountedVariationNormalization(shape=[], until=int(1.0e8)).to(
-                self.device
-            )
+            self.reward_normalizer = EmpiricalDiscountedVariationNormalization(shape=[], until=1.0e8).to(self.device)
         else:
             self.reward_normalizer = torch.nn.Identity()
 
@@ -120,11 +114,7 @@ class RandomNetworkDistillation(nn.Module):
         # Make target network not trainable
         self.target.eval()
 
-        # Optimizer for the predictor (the target is frozen)
-        self.optimizer = torch.optim.Adam(self.predictor.parameters(), lr=learning_rate)
-
     def get_intrinsic_reward(self, obs: TensorDict) -> torch.Tensor:
-        """Compute weighted intrinsic rewards from prediction error in embedding space."""
         # Note: The counter is updated number of env steps per learning iteration
         self.update_counter += 1
         # Extract the rnd state from the observation
@@ -147,23 +137,10 @@ class RandomNetworkDistillation(nn.Module):
 
         return intrinsic_reward
 
-    def compute_loss(self, obs: TensorDict) -> torch.Tensor:
-        """Compute the predictor loss (MSE between predicted and target embeddings)."""
-        # Prepare the RND state; normalizer statistics are not updated here
-        with torch.no_grad():
-            rnd_state = self.get_rnd_state(obs)
-            rnd_state = self.state_normalizer(rnd_state)
-        # Predictor is trainable, target is frozen
-        predicted_embedding = self.predictor(rnd_state)
-        target_embedding = self.target(rnd_state).detach()
-        return nn.functional.mse_loss(predicted_embedding, target_embedding)
-
     def forward(self, *args: Any, **kwargs: dict[str, Any]) -> NoReturn:
-        """Disallow generic forward calls for this module."""
         raise RuntimeError("Forward method is not implemented. Use get_intrinsic_reward instead.")
 
     def train(self, mode: bool = True) -> RandomNetworkDistillation:
-        """Set training mode for predictor and optional normalizers."""
         # Set module into training mode
         self.predictor.train(mode)
         if self.state_normalization:
@@ -173,33 +150,27 @@ class RandomNetworkDistillation(nn.Module):
         return self
 
     def eval(self) -> RandomNetworkDistillation:
-        """Set the module to evaluation mode."""
         return self.train(False)
 
     def get_rnd_state(self, obs: TensorDict) -> torch.Tensor:
-        """Extract and concatenate observation groups used as theRND state."""
         obs_list = [obs[obs_group] for obs_group in self.obs_groups["rnd_state"]]
         return torch.cat(obs_list, dim=-1)
 
     def update_normalization(self, obs: TensorDict) -> None:
-        """Update state-normalization statistics from observations."""
         # Normalize the state
         if self.state_normalization:
             rnd_state = self.get_rnd_state(obs)
-            self.state_normalizer.update(rnd_state)  # type: ignore
+            self.state_normalizer.update(rnd_state)
 
     def _constant_weight_schedule(self, step: int, **kwargs: dict[str, Any]) -> float:
-        """Keep the intrinsic reward weight constant."""
         return self.initial_weight
 
     def _step_weight_schedule(self, step: int, final_step: int, final_value: float, **kwargs: dict[str, Any]) -> float:
-        """Switch the intrinsic reward weight at a configured step."""
         return self.initial_weight if step < final_step else final_value
 
     def _linear_weight_schedule(
         self, step: int, initial_step: int, final_step: int, final_value: float, **kwargs: dict[str, Any]
     ) -> float:
-        """Linearly interpolate the intrinsic reward weight over a step interval."""
         if step < initial_step:
             return self.initial_weight
         elif step > final_step:
@@ -227,16 +198,11 @@ def resolve_rnd_config(alg_cfg: dict, obs: TensorDict, obs_groups: dict[str, lis
         # Get dimension of rnd gated state
         num_rnd_state = 0
         for obs_group in obs_groups["rnd_state"]:
-            if len(obs[obs_group].shape) != 2:
-                raise ValueError(
-                    f"The RND module only supports 1D observations, got shape {obs[obs_group].shape} for '{obs_group}'."
-                )
+            assert len(obs[obs_group].shape) == 2, "The RND module only supports 1D observations."
             num_rnd_state += obs[obs_group].shape[-1]
         # Add rnd gated state to config
         alg_cfg["rnd_cfg"]["num_states"] = num_rnd_state
         alg_cfg["rnd_cfg"]["obs_groups"] = obs_groups
         # Scale down the rnd weight with timestep
-        alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt  # type: ignore
-    else:
-        alg_cfg["rnd_cfg"] = None
+        alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt
     return alg_cfg
