@@ -113,9 +113,11 @@ class WasabiPPO(PPO):
             "wasabi_reference_logit": 0.0,
         }
 
-        for batch in self.wasabi_storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs):
-            policy_logits = self.discriminator(batch.current_states)
-            reference_logits = self.discriminator(batch.reference_states)
+        for current_states, reference_states, dones in self.wasabi_storage.mini_batch_generator(
+            self.num_mini_batches, self.num_learning_epochs
+        ):
+            policy_logits = self.discriminator(current_states)
+            reference_logits = self.discriminator(reference_states)
             if self.loss_type == "BCEWithLogitsLoss":
                 policy_loss = torch.nn.functional.binary_cross_entropy_with_logits(
                     policy_logits, torch.zeros_like(policy_logits)
@@ -134,8 +136,8 @@ class WasabiPPO(PPO):
             discriminator_loss = 0.5 * (policy_loss + reference_loss)
 
             gradient_penalty = self.discriminator.compute_grad_pen(
-                batch.current_states,
-                batch.reference_states,
+                current_states,
+                reference_states,
                 lambda_=self.grad_pen_coef,
                 gradient_tolerance=self.grad_tolerance,
             )
@@ -205,7 +207,9 @@ class WasabiPPO(PPO):
         self.discriminator.load_state_dict(state[0])
 
     @staticmethod
-    def construct_algorithm(obs: TensorDict, env: VecEnv, cfg: dict, device: str) -> "WasabiPPO":
+    def construct_algorithm(
+        obs: TensorDict, env: VecEnv, cfg: dict, device: str, multi_gpu_cfg: dict | None = None
+    ) -> "WasabiPPO":
         """Resolve WASABI observation keys before constructing PPO components."""
         wasabi_cfg = cfg["algorithm"].get("wasabi_cfg")
         if wasabi_cfg is None:
@@ -236,7 +240,7 @@ class WasabiPPO(PPO):
 
         wasabi_cfg["state_dim"] = policy_dim
         cfg["algorithm"]["wasabi_cfg"] = wasabi_cfg
-        return PPO.construct_algorithm(obs, env, cfg, device)
+        return PPO.construct_algorithm(obs, env, cfg, device, multi_gpu_cfg)
 
     def reduce_discriminator_parameters(self) -> None:
         """Average discriminator gradients across GPUs."""

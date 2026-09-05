@@ -2,17 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Generator, NamedTuple
+from typing import Generator
 
 import torch
-
-
-class WasabiMiniBatch(NamedTuple):
-    """A batch of current/reference states and episode termination flags."""
-
-    current_states: torch.Tensor
-    reference_states: torch.Tensor
-    dones: torch.Tensor
 
 
 class WasabiStorage:
@@ -47,7 +39,9 @@ class WasabiStorage:
             self.reference_states[: self.step].flatten(0, 1),
         )
 
-    def mini_batch_generator(self, num_mini_batches: int, num_epochs: int) -> Generator[WasabiMiniBatch, None, None]:
+    def mini_batch_generator(
+        self, num_mini_batches: int, num_epochs: int
+    ) -> Generator[tuple[torch.Tensor, torch.Tensor, torch.Tensor], None, None]:
         """Yield shuffled feed-forward mini-batches for each discriminator epoch."""
         if self.step == 0:
             return
@@ -58,7 +52,7 @@ class WasabiStorage:
         for _ in range(num_epochs):
             for indices in torch.tensor_split(torch.randperm(batch_size, device=current_states.device), num_mini_batches):
                 if indices.numel() != 0:
-                    yield WasabiMiniBatch(current_states[indices], reference_states[indices], dones[indices])
+                    yield current_states[indices], reference_states[indices], dones[indices]
 
     def clear(self) -> None:
         """Mark all stored transitions as reusable."""
