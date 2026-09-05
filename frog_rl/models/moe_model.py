@@ -57,8 +57,10 @@ class MoEModel(MLPModel):
             num_experts: Number of expert networks in the mixture-of-experts layer.
             gate_hidden_dims: Hidden dimensions of the gating network. Empty results in a plain linear gate.
         """
+        if not isinstance(num_experts, int) or num_experts < 1:
+            raise ValueError(f"num_experts must be a positive integer, got {num_experts!r}.")
         self.num_experts = num_experts
-        self.gate_hidden_dims = gate_hidden_dims
+        self.gate_hidden_dims = tuple(gate_hidden_dims)
 
         # Initialize the parent MLP model (observation handling, normalization and distribution)
         super().__init__(
@@ -131,14 +133,12 @@ class MoEModel(MLPModel):
     def _moe_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Mix the expert outputs according to the softmax gating scores."""
         gate_scores = F.softmax(self.gate(x), dim=-1)  # [..., num_experts]
-        expert_outputs = []
-        for expert in self.experts:
-            expert_outputs.append(expert(x))
-        expert_outputs = torch.stack(expert_outputs, dim=1)  # [..., num_experts, *output_dims]
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=x.dim() - 1)
+        expert_dim = x.dim() - 1
         # Align the gating scores for broadcasting over the (possibly multi-dimensional) expert outputs.
         for _ in range(expert_outputs.dim() - gate_scores.dim()):
             gate_scores = gate_scores.unsqueeze(-1)
-        return torch.sum(expert_outputs * gate_scores, dim=1)
+        return torch.sum(expert_outputs * gate_scores, dim=expert_dim)
 
     def as_jit(self) -> nn.Module:
         """Return a version of the model compatible with Torch JIT export."""
@@ -167,13 +167,11 @@ class _TorchMoEModel(nn.Module):
         """Run deterministic inference on pre-concatenated observations."""
         x = self.obs_normalizer(x)
         gate_scores = F.softmax(self.gate(x), dim=-1)
-        expert_outputs = []
-        for expert in self.experts:
-            expert_outputs.append(expert(x))
-        expert_outputs = torch.stack(expert_outputs, dim=1)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=x.dim() - 1)
+        expert_dim = x.dim() - 1
         for _ in range(expert_outputs.dim() - gate_scores.dim()):
             gate_scores = gate_scores.unsqueeze(-1)
-        out = torch.sum(expert_outputs * gate_scores, dim=1)
+        out = torch.sum(expert_outputs * gate_scores, dim=expert_dim)
         return self.deterministic_output(out)
 
     @torch.jit.export
@@ -204,13 +202,11 @@ class _OnnxMoEModel(nn.Module):
         """Run deterministic inference for ONNX export."""
         x = self.obs_normalizer(x)
         gate_scores = F.softmax(self.gate(x), dim=-1)
-        expert_outputs = []
-        for expert in self.experts:
-            expert_outputs.append(expert(x))
-        expert_outputs = torch.stack(expert_outputs, dim=1)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=x.dim() - 1)
+        expert_dim = x.dim() - 1
         for _ in range(expert_outputs.dim() - gate_scores.dim()):
             gate_scores = gate_scores.unsqueeze(-1)
-        out = torch.sum(expert_outputs * gate_scores, dim=1)
+        out = torch.sum(expert_outputs * gate_scores, dim=expert_dim)
         return self.deterministic_output(out)
 
     def get_dummy_inputs(self) -> tuple[torch.Tensor]:

@@ -27,7 +27,7 @@ class AMPStorage:
         self.step = 0
         self.num_samples = 0
 
-    def insert(self, states: torch.Tensor, next_states: torch.Tensor) -> None:
+    def add(self, states: torch.Tensor, next_states: torch.Tensor) -> None:
         """Add new states to memory.
 
         Args:
@@ -49,7 +49,7 @@ class AMPStorage:
         self.num_samples = min(self.buffer_size, max(end_idx, self.num_samples))
         self.step = (self.step + num_states) % self.buffer_size
 
-    def feed_forward_generator(self, num_mini_batch: int, mini_batch_size: int) -> Generator:
+    def mini_batch_generator(self, num_mini_batch: int, mini_batch_size: int) -> Generator:
         """Yield random mini-batches of ``(states, next_states)``.
 
         Args:
@@ -65,4 +65,3 @@ class AMPStorage:
                 self.states[sample_idxs].to(self.device),
                 self.next_states[sample_idxs].to(self.device),
             )
-

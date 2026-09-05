@@ -314,13 +314,21 @@ class HeteroscedasticGaussianDistribution(GaussianDistribution):
 
     def init_mlp_weights(self, mlp: nn.Module) -> None:
         """Initialize the std head weights in the MLP."""
-        # Initialize weights and biases for the std portion of the last layer
-        torch.nn.init.zeros_(mlp[-2].weight[self.output_dim :])  # type: ignore
+        # Find the final linear layer; heads may be plain Linear or Sequential MLPs.
+        linear_layers = [module for module in mlp.modules() if isinstance(module, nn.Linear)]
+        if not linear_layers:
+            raise ValueError("The distribution head must contain a Linear output layer.")
+        output_layer = linear_layers[-1]
+        if output_layer.out_features != 2 * self.output_dim:
+            raise ValueError(
+                f"Expected a {2 * self.output_dim}-wide heteroscedastic head, got {output_layer.out_features}."
+            )
+        torch.nn.init.zeros_(output_layer.weight[self.output_dim :])
         if self.std_type == "scalar":
-            torch.nn.init.constant_(mlp[-2].bias[self.output_dim :], self.init_std)  # type: ignore
+            torch.nn.init.constant_(output_layer.bias[self.output_dim :], self.init_std)
         elif self.std_type == "log":
             init_std_log = torch.log(torch.tensor(self.init_std + 1e-7))
-            torch.nn.init.constant_(mlp[-2].bias[self.output_dim :], init_std_log)  # type: ignore
+            torch.nn.init.constant_(output_layer.bias[self.output_dim :], init_std_log)
 
 
 class BetaDistribution(Distribution):

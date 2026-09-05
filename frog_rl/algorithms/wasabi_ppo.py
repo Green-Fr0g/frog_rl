@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Literal
 
 import torch
@@ -19,33 +18,6 @@ from frog_rl.utils import resolve_callable, resolve_optimizer
 
 LossType = Literal["BCEWithLogitsLoss", "MSELoss", "WassersteinLoss"]
 RewardType = Literal["log", "quad", "wasserstein"]
-_WASABI_TERM_ORDER = ("projected_gravity", "joint_pos_rel", "joint_vel", "base_lin_vel", "base_ang_vel")
-
-
-def _flatten_wasabi_state(state, state_key: str) -> torch.Tensor:
-    """Flatten an InstinctLab-style non-concatenated state group."""
-    if isinstance(state, torch.Tensor):
-        if state.ndim != 2:
-            raise ValueError(f"WASABI state '{state_key}' must be 2-D, got {tuple(state.shape)}.")
-        return state
-    if isinstance(state, Mapping) or (hasattr(state, "keys") and hasattr(state, "__getitem__")):
-        missing = [term for term in _WASABI_TERM_ORDER if term not in state]
-        if missing:
-            raise ValueError(f"WASABI state '{state_key}' is missing terms: {missing}.")
-        values = []
-        for term in _WASABI_TERM_ORDER:
-            value = state[term]
-            if not isinstance(value, torch.Tensor) or value.ndim != 2:
-                shape = getattr(value, "shape", None)
-                raise ValueError(f"WASABI term '{state_key}.{term}' must be a 2-D Tensor, got {shape}.")
-            values.append(value)
-        return torch.cat(values, dim=-1)
-    raise TypeError(f"WASABI state '{state_key}' must be a Tensor or mapping, got {type(state).__name__}.")
-
-
-def _wasabi_state_dim(state, state_key: str) -> int:
-    return _flatten_wasabi_state(state, state_key).shape[-1]
-
 
 class WasabiPPO(PPO):
     """PPO with a configurable state-pair discriminator."""
@@ -65,17 +37,23 @@ class WasabiPPO(PPO):
             raise ValueError("WasabiPPO requires an algorithm.wasabi_cfg configuration.")
 
         self.wasabi_cfg = dict(wasabi_cfg)
-        self.policy_state_key = self.wasabi_cfg.setdefault("policy_state_key", "wasabi_policy")
-        self.reference_state_key = self.wasabi_cfg.setdefault("reference_state_key", "wasabi_reference")
-        self.task_reward_weight = float(self.wasabi_cfg.get("task_reward_weight", 1.0))
-        self.reward_type: RewardType = self.wasabi_cfg.get("reward_type", "log")
-        self.reward_coef = float(self.wasabi_cfg.get("reward_coef", 1.0))
-        self.loss_type: LossType = self.wasabi_cfg.get("loss_type", "BCEWithLogitsLoss")
-        self.loss_coef = float(self.wasabi_cfg.get("loss_coef", 1.0))
-        self.gradient_penalty_coef = float(self.wasabi_cfg.get("gradient_penalty_coef", 10.0))
-        self.gradient_tolerance = float(self.wasabi_cfg.get("gradient_tolerance", 0.0))
-        self.weight_decay_coef = float(self.wasabi_cfg.get("weight_decay_coef", 0.0))
-        self.logit_weight_decay_coef = float(self.wasabi_cfg.get("logit_weight_decay_coef", 0.0))
+        self.policy_state_key = self.wasabi_cfg.setdefault(
+            "wasabi_policy_state_key", self.wasabi_cfg.get("policy_state_key", "wasabi_policy")
+        )
+        self.reference_state_key = self.wasabi_cfg.setdefault(
+            "wasabi_reference_state_key", self.wasabi_cfg.get("reference_state_key", "wasabi_reference")
+        )
+        self.task_reward_weight = float(
+            self.wasabi_cfg.get("wasabi_task_reward_weight", self.wasabi_cfg.get("task_reward_weight", 1.0))
+        )
+        self.reward_type: RewardType = self.wasabi_cfg.get("wasabi_reward_type", self.wasabi_cfg.get("reward_type", "log"))
+        self.reward_coef = float(self.wasabi_cfg.get("wasabi_reward_coef", self.wasabi_cfg.get("reward_coef", 1.0)))
+        self.loss_type: LossType = self.wasabi_cfg.get("wasabi_loss_type", self.wasabi_cfg.get("loss_type", "BCEWithLogitsLoss"))
+        self.loss_coef = float(self.wasabi_cfg.get("wasabi_loss_coef", self.wasabi_cfg.get("loss_coef", 1.0)))
+        self.gradient_penalty_coef = float(self.wasabi_cfg.get("wasabi_grad_pen_coef", self.wasabi_cfg.get("gradient_penalty_coef", 10.0)))
+        self.gradient_tolerance = float(self.wasabi_cfg.get("wasabi_grad_tolerance", self.wasabi_cfg.get("gradient_tolerance", 0.0)))
+        self.weight_decay_coef = float(self.wasabi_cfg.get("wasabi_trunk_weight_decay", self.wasabi_cfg.get("weight_decay_coef", 0.0)))
+        self.logit_weight_decay_coef = float(self.wasabi_cfg.get("wasabi_head_weight_decay", self.wasabi_cfg.get("logit_weight_decay_coef", 0.0)))
         self.discriminator_backbone_gradient_only = bool(
             self.wasabi_cfg.get("discriminator_backbone_gradient_only", False)
         )
@@ -86,17 +64,17 @@ class WasabiPPO(PPO):
         self.discriminator = discriminator_class(
             state_dim=self.wasabi_cfg["state_dim"],
             **{
-                "hidden_dims": self.wasabi_cfg.get("hidden_dims", (512, 256)),
-                "activation": self.wasabi_cfg.get("activation", "elu"),
-                "normalize_input": self.wasabi_cfg.get("normalize_input", True),
-                "normalization_until": self.wasabi_cfg.get("normalization_until", int(1e8)),
+                "hidden_dims": self.wasabi_cfg.get("wasabi_discr_hidden_dims", self.wasabi_cfg.get("hidden_dims", (512, 256))),
+                "activation": self.wasabi_cfg.get("wasabi_discr_activation", self.wasabi_cfg.get("activation", "elu")),
+                "normalize_input": self.wasabi_cfg.get("wasabi_normalize_input", self.wasabi_cfg.get("normalize_input", True)),
+                "normalization_until": self.wasabi_cfg.get("wasabi_normalization_until", self.wasabi_cfg.get("normalization_until", int(1e8))),
                 **discriminator_kwargs,
             },
         ).to(device)
 
-        optimizer_class = resolve_optimizer(self.wasabi_cfg.get("discriminator_optimizer", "adamw"))
+        optimizer_class = resolve_optimizer(self.wasabi_cfg.get("wasabi_discriminator_optimizer", self.wasabi_cfg.get("discriminator_optimizer", "adamw")))
         discriminator_optimizer_kwargs = dict(self.wasabi_cfg.get("discriminator_optimizer_kwargs", {}))
-        discriminator_optimizer_kwargs.setdefault("lr", self.wasabi_cfg.get("learning_rate", self.learning_rate))
+        discriminator_optimizer_kwargs.setdefault("lr", self.wasabi_cfg.get("wasabi_discriminator_lr", self.wasabi_cfg.get("learning_rate", self.learning_rate)))
         self.discriminator_optimizer = optimizer_class(self.discriminator.parameters(), **discriminator_optimizer_kwargs)
 
         self.wasabi_storage = WasabiStorage(
@@ -107,8 +85,8 @@ class WasabiPPO(PPO):
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Capture discriminator inputs from the pre-action observation."""
-        self._policy_state = _flatten_wasabi_state(obs[self.policy_state_key], self.policy_state_key)
-        self._reference_state = _flatten_wasabi_state(obs[self.reference_state_key], self.reference_state_key)
+        self._policy_state = obs[self.policy_state_key]
+        self._reference_state = obs[self.reference_state_key]
         return super().act(obs)
 
     def process_env_step(
@@ -128,8 +106,10 @@ class WasabiPPO(PPO):
     def update(self) -> dict[str, float]:
         """Run PPO, then optimize the discriminator from the collected rollout."""
         loss_dict = super().update()
-        if self.wasabi_storage.num_samples:
-            self._update_discriminator(loss_dict)
+        if self.wasabi_storage.num_samples == 0:
+            self.wasabi_storage.clear()
+            return loss_dict
+        self._update_discriminator(loss_dict)
         self.wasabi_storage.clear()
         return loss_dict
 
@@ -178,16 +158,22 @@ class WasabiPPO(PPO):
             raise ValueError("WasabiPPO requires algorithm.wasabi_cfg.")
 
         wasabi_cfg = dict(wasabi_cfg)
-        wasabi_cfg.setdefault("policy_state_key", "wasabi_policy")
-        wasabi_cfg.setdefault("reference_state_key", "wasabi_reference")
-        policy_key = wasabi_cfg["policy_state_key"]
-        reference_key = wasabi_cfg["reference_state_key"]
+        wasabi_cfg.setdefault("wasabi_policy_state_key", wasabi_cfg.get("policy_state_key", "wasabi_policy"))
+        wasabi_cfg.setdefault("wasabi_reference_state_key", wasabi_cfg.get("reference_state_key", "wasabi_reference"))
+        policy_key = wasabi_cfg["wasabi_policy_state_key"]
+        reference_key = wasabi_cfg["wasabi_reference_state_key"]
         missing_keys = [key for key in (policy_key, reference_key) if key not in obs]
         if missing_keys:
             raise ValueError(f"WasabiPPO observations are missing {missing_keys}; available: {list(obs.keys())}")
 
-        policy_dim = _wasabi_state_dim(obs[policy_key], policy_key)
-        reference_dim = _wasabi_state_dim(obs[reference_key], reference_key)
+        policy_state = obs[policy_key]
+        reference_state = obs[reference_key]
+        if not isinstance(policy_state, torch.Tensor) or policy_state.ndim != 2:
+            raise ValueError(f"WASABI state '{policy_key}' must be a 2-D Tensor.")
+        if not isinstance(reference_state, torch.Tensor) or reference_state.ndim != 2:
+            raise ValueError(f"WASABI state '{reference_key}' must be a 2-D Tensor.")
+        policy_dim = policy_state.shape[-1]
+        reference_dim = reference_state.shape[-1]
         if policy_dim != reference_dim:
             raise ValueError(
                 f"WASABI policy/reference state dimensions differ: {policy_dim} != {reference_dim}. "
@@ -200,7 +186,7 @@ class WasabiPPO(PPO):
 
     def _update_discriminator(self, loss_dict: dict[str, float]) -> None:
         """Optimize discriminator objectives migrated from the WASABI implementation."""
-        self._update_normalizer()
+        self.update_normalizer()
         num_updates = self.num_learning_epochs * self.num_mini_batches
         metrics = {
             "wasabi_discriminator_loss": 0.0,
@@ -211,11 +197,13 @@ class WasabiPPO(PPO):
             "wasabi_reference_logit": 0.0,
         }
 
-        for batch in self.wasabi_storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs):
-            policy_logits = self.discriminator(batch.policy_states)
-            reference_logits = self.discriminator(batch.reference_states)
+        for current_states, reference_states, _ in self.wasabi_storage.mini_batch_generator(
+            self.num_mini_batches, self.num_learning_epochs
+        ):
+            policy_logits = self.discriminator(current_states)
+            reference_logits = self.discriminator(reference_states)
             discriminator_loss = self._classification_loss(policy_logits, reference_logits)
-            gradient_penalty = self._gradient_penalty(batch.policy_states, batch.reference_states)
+            gradient_penalty = self._gradient_penalty(current_states, reference_states)
             weight_decay = sum(parameter.square().sum() for parameter in self.discriminator.parameters())
             logit_weight_decay = self._logit_weight_decay()
             loss = (
@@ -310,7 +298,7 @@ class WasabiPPO(PPO):
             return self.discriminator.amp_linear.weight.square().sum()
         return torch.zeros((), device=self.device)
 
-    def _update_normalizer(self) -> None:
+    def update_normalizer(self) -> None:
         normalizer = getattr(self.discriminator, "normalizer", None)
         if not isinstance(normalizer, EmpiricalNormalization):
             return
@@ -318,12 +306,12 @@ class WasabiPPO(PPO):
         policy_states, reference_states = self.wasabi_storage.states()
         states = torch.cat([policy_states, reference_states], dim=0)
         if self.is_multi_gpu and dist.is_initialized():
-            self._update_normalizer_distributed(normalizer, states)
+            self.update_normalizer_distributed(normalizer, states)
         else:
             normalizer.update(states)
 
     @staticmethod
-    def _update_normalizer_distributed(normalizer: EmpiricalNormalization, states: torch.Tensor) -> None:
+    def update_normalizer_distributed(normalizer: EmpiricalNormalization, states: torch.Tensor) -> None:
         """Merge raw moments across ranks before updating the discriminator normalizer."""
         if normalizer.until is not None and normalizer.count >= normalizer.until:
             return

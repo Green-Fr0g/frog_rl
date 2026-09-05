@@ -50,23 +50,26 @@ class MLP(nn.Sequential):
         # Resolve number of hidden dims if they are -1
         hidden_dims_processed = [input_dim if dim == -1 else dim for dim in hidden_dims]
 
-        # Create layers sequentially
+        # Create hidden layers. An empty hidden_dims list is a valid linear head.
         layers = []
-        layers.append(nn.Linear(input_dim, hidden_dims_processed[0]))
-        layers.append(activation_mod)
-
-        for layer_index in range(len(hidden_dims_processed) - 1):
-            layers.append(nn.Linear(hidden_dims_processed[layer_index], hidden_dims_processed[layer_index + 1]))
+        if hidden_dims_processed:
+            layers.append(nn.Linear(input_dim, hidden_dims_processed[0]))
             layers.append(activation_mod)
+            for layer_index in range(len(hidden_dims_processed) - 1):
+                layers.append(nn.Linear(hidden_dims_processed[layer_index], hidden_dims_processed[layer_index + 1]))
+                layers.append(activation_mod)
+            last_dim = hidden_dims_processed[-1]
+        else:
+            last_dim = input_dim
 
-        # Add last layer
+        # Add output layer
         if isinstance(output_dim, int):
-            layers.append(nn.Linear(hidden_dims_processed[-1], output_dim))
+            layers.append(nn.Linear(last_dim, output_dim))
         else:
             # Compute the total output dimension
             total_out_dim = reduce(lambda x, y: x * y, output_dim)
             # Add a layer to reshape the output to the desired shape
-            layers.append(nn.Linear(hidden_dims_processed[-1], total_out_dim))
+            layers.append(nn.Linear(last_dim, total_out_dim))
             layers.append(nn.Unflatten(dim=-1, unflattened_size=output_dim))
 
         # Add last activation function if specified

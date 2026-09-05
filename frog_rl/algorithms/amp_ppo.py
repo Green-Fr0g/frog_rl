@@ -2,45 +2,17 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import torch
 import torch.nn.functional as F
 from tensordict import TensorDict
 
-from frog_rl.algorithms.amp_discriminator import AMPDiscriminator
 from frog_rl.algorithms.ppo import PPO
+from frog_rl.models.amp_discriminator import AMPDiscriminator
 from frog_rl.modules.normalization import EmpiricalNormalization
-from frog_rl.storage import AMPStorage
-from frog_rl.utils import resolve_callable, resolve_optimizer
-
-
-def resolve_amp_config(alg_cfg: dict, obs, env) -> dict:
-    """Resolve the AMP configuration."""
-    amp_cfg = alg_cfg.get("amp_cfg")
-    if amp_cfg is None:
-        alg_cfg["amp_cfg"] = None
-        return alg_cfg
-
-    amp_cfg = dict(amp_cfg)
-    state_key = amp_cfg.get("expert_state_key", "amp_state")
-    if not isinstance(state_key, str) or not state_key:
-        raise ValueError("AMPPPO requires a non-empty amp_cfg.expert_state_key.")
-    if state_key not in obs:
-        raise ValueError(
-            f"AMPPPO requires the '{state_key}' observation group, "
-            f"but it is not present. Available observations: {list(obs.keys())}"
-        )
-    state = obs[state_key]
-    if not isinstance(state, torch.Tensor) or state.ndim != 2:
-        raise ValueError(
-            f"AMPPPO observation '{state_key}' must be a 2-D Tensor, "
-            f"got {type(state).__name__} with shape {getattr(state, 'shape', None)}."
-        )
-    amp_cfg["expert_state_key"] = state_key
-    amp_cfg["state_dim"] = state.shape[-1]
-    amp_cfg["discriminator_input_dim"] = 2 * amp_cfg["state_dim"]
-    amp_cfg.setdefault("time_between_frames", env.unwrapped.step_dt)
-    alg_cfg["amp_cfg"] = amp_cfg
-    return alg_cfg
+from frog_rl.storage import AMPStorage, RolloutStorage
+from frog_rl.utils import resolve_callable, resolve_obs_groups, resolve_optimizer
 
 
 class AMPPPO(PPO):
@@ -62,7 +34,7 @@ class AMPPPO(PPO):
             raise ValueError("The AMP configuration 'amp_cfg' is required for AMPPPO.")
 
         self.amp_cfg = amp_cfg
-        self.expert_state_key = amp_cfg.get("expert_state_key", "amp_state")
+        self.amp_state_key = amp_cfg["amp_state_key"]
         self.state_dim = amp_cfg["state_dim"]
         self.discriminator = AMPDiscriminator(
             input_dim=amp_cfg["discriminator_input_dim"],
@@ -73,7 +45,9 @@ class AMPPPO(PPO):
             task_reward_lerp=amp_cfg.get("amp_task_reward_lerp", 0.0),
         )
         self.amp_storage = AMPStorage(self.state_dim, amp_cfg.get("amp_replay_buffer_size", 1000000), device)
-        self.amp_normalizer = EmpiricalNormalization(shape=self.state_dim, until=int(1.0e8)).to(device)
+        self.amp_normalizer = EmpiricalNormalization(
+            shape=self.state_dim, until=int(amp_cfg.get("normalization_until", 1.0e8))
+        ).to(device)
         motion_loader_class_name = amp_cfg.get("motion_loader_class_name")
         if not motion_loader_class_name:
             raise ValueError("AMPPPO requires amp_cfg.motion_loader_class_name.")
@@ -89,7 +63,7 @@ class AMPPPO(PPO):
         expert_state_dim = getattr(self.amp_data, "state_dim", None)
         if expert_state_dim is not None and expert_state_dim != self.state_dim:
             raise ValueError(
-                f"AMP expert state dimension mismatch: observation '{self.expert_state_key}' has "
+                f"AMP expert state dimension mismatch: observation '{self.amp_state_key}' has "
                 f"dimension {self.state_dim}, motion loader has {expert_state_dim}."
             )
 
@@ -113,7 +87,7 @@ class AMPPPO(PPO):
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Cache the current AMP state before sampling actions."""
-        self._current_amp_state = obs[self.expert_state_key]
+        self._current_amp_state = obs[self.amp_state_key].detach().clone()
         return super().act(obs)
 
     def process_env_step(
@@ -123,24 +97,77 @@ class AMPPPO(PPO):
         if self._current_amp_state is None:
             raise RuntimeError("AMPPPO.process_env_step() must be called after act().")
 
-        next_amp_state = obs[self.expert_state_key]
-        terminal_key = f"terminal_{self.expert_state_key}s"
-        if terminal_key in extras:
-            reset_env_ids = (dones > 0).flatten().nonzero(as_tuple=False).flatten()
-            next_amp_state = next_amp_state.clone()
-            next_amp_state[reset_env_ids] = extras[terminal_key][reset_env_ids]
+        next_amp_state = obs[self.amp_state_key].clone()
+        reset_env_ids = (dones > 0).nonzero(as_tuple=False).flatten()
+        if len(reset_env_ids) > 0:
+            next_amp_state[reset_env_ids] = self._current_amp_state[reset_env_ids]
 
-        self.amp_storage.insert(self._current_amp_state, next_amp_state)
+        self.amp_storage.add(self._current_amp_state, next_amp_state)
         amp_reward, _ = self.discriminator.reward(self._current_amp_state, next_amp_state, rewards, self.amp_normalizer)
         super().process_env_step(obs, amp_reward.reshape(-1), dones, extras)
-        self._current_amp_state = next_amp_state
+        self._current_amp_state = next_amp_state.detach().clone()
 
     def update(self) -> dict[str, float]:
         """Run PPO updates followed by discriminator training."""
         loss_dict = super().update()
         mini_batch_size = self.storage.num_envs * self.storage.num_transitions_per_env // self.num_mini_batches
-        if self.amp_storage.num_samples >= mini_batch_size:
-            self._train_discriminator(mini_batch_size, loss_dict)
+        # Train the discriminator as soon as the buffer holds any samples. During the cold-start
+        # the buffer may hold fewer than one mini-batch, so cap the per-update batch size to the
+        # samples currently available instead of skipping discriminator training entirely.
+        num_samples = self.amp_storage.num_samples
+        if num_samples > 0:
+            num_updates = self.num_learning_epochs * self.num_mini_batches
+            amp_batch_size = min(mini_batch_size, num_samples)
+            mean_amp_loss = 0.0
+            mean_grad_pen_loss = 0.0
+            mean_policy_pred = 0.0
+            mean_expert_pred = 0.0
+
+            self.amp_normalizer.train()
+            policy_generator = self.amp_storage.mini_batch_generator(num_updates, amp_batch_size)
+            expert_generator = getattr(self.amp_data, "mini_batch_generator", None)
+            if expert_generator is None:
+                expert_generator = self.amp_data.mini_batch_generator
+            expert_generator = expert_generator(num_updates, amp_batch_size)
+
+            for (policy_state, policy_next_state), (expert_state, expert_next_state) in zip(
+                policy_generator, expert_generator
+            ):
+                policy_state_norm = self.amp_normalizer(policy_state)
+                policy_next_state_norm = self.amp_normalizer(policy_next_state)
+                expert_state_norm = self.amp_normalizer(expert_state)
+                expert_next_state_norm = self.amp_normalizer(expert_next_state)
+
+                policy_d = self.discriminator(torch.cat([policy_state_norm, policy_next_state_norm], dim=-1))
+                expert_d = self.discriminator(torch.cat([expert_state_norm, expert_next_state_norm], dim=-1))
+                expert_loss = F.mse_loss(expert_d, torch.ones_like(expert_d))
+                policy_loss = F.mse_loss(policy_d, -torch.ones_like(policy_d))
+                amp_loss = 0.5 * (expert_loss + policy_loss)
+                grad_pen_loss = self.discriminator.compute_gradient_penalty(
+                    expert_state_norm, expert_next_state_norm, lambda_=self.grad_pen_coef
+                )
+                loss = amp_loss + grad_pen_loss
+
+                self.discriminator_optimizer.zero_grad()
+                loss.backward()
+                if self.is_multi_gpu:
+                    self.reduce_discriminator_parameters()
+                self.discriminator_optimizer.step()
+
+                self.amp_normalizer.update(policy_state.detach())
+                self.amp_normalizer.update(policy_next_state.detach())
+                self.amp_normalizer.update(expert_state.detach())
+                self.amp_normalizer.update(expert_next_state.detach())
+
+                mean_amp_loss += amp_loss.item()
+                mean_grad_pen_loss += grad_pen_loss.item()
+                mean_policy_pred += policy_d.mean().item()
+                mean_expert_pred += expert_d.mean().item()
+
+            loss_dict["amp_loss"] = mean_amp_loss / num_updates
+            loss_dict["amp_grad_pen"] = mean_grad_pen_loss / num_updates
+            loss_dict["amp_policy_pred"] = mean_policy_pred / num_updates
+            loss_dict["amp_expert_pred"] = mean_expert_pred / num_updates
         return loss_dict
 
     def train_mode(self) -> None:
@@ -186,40 +213,63 @@ class AMPPPO(PPO):
 
     @staticmethod
     def construct_algorithm(obs: TensorDict, env, cfg: dict, device: str) -> "AMPPPO":
-        """Construct the AMP-PPO algorithm."""
-        if "policy" in cfg:
-            policy_cfg = dict(cfg.pop("policy"))
+        """Construct AMP-PPO with all AMP settings resolved in one pass."""
+        config = deepcopy(cfg)
+        algorithm_cfg = config["algorithm"]
+        amp_cfg = deepcopy(algorithm_cfg.pop("amp_cfg"))
+        if amp_cfg is None:
+            raise ValueError("AMPPPO requires algorithm.amp_cfg.")
+
+        state_key = amp_cfg["amp_state_key"]
+        if state_key not in obs:
+            raise ValueError(f"AMP observation '{state_key}' is missing. Available: {list(obs.keys())}")
+        state = obs[state_key]
+        if not isinstance(state, torch.Tensor) or state.ndim != 2:
+            raise ValueError(f"AMP observation '{state_key}' must be a 2-D tensor.")
+        amp_cfg["state_dim"] = int(state.shape[-1])
+        amp_cfg["discriminator_input_dim"] = 2 * amp_cfg["state_dim"]
+        amp_cfg.setdefault("time_between_frames", env.unwrapped.step_dt)
+
+        policy_cfg = config.get("policy")
+        if policy_cfg is not None:
+            policy_cfg = dict(policy_cfg)
             distribution_class = (
                 "frog_rl.modules.distribution:HeteroscedasticGaussianDistribution"
                 if policy_cfg.get("state_dependent_std", False)
                 else "frog_rl.modules.distribution:GaussianDistribution"
             )
-
-            cfg["actor"] = {
+            config["actor"] = {
                 "class_name": "frog_rl.models.mlp_model:MLPModel",
                 "hidden_dims": policy_cfg["actor_hidden_dims"],
                 "activation": policy_cfg["activation"],
                 "obs_normalization": policy_cfg["actor_obs_normalization"],
-                "distribution_cfg": {
-                    "class_name": distribution_class,
-                    "init_std": policy_cfg["init_noise_std"],
-                    "std_type": policy_cfg.get("noise_std_type", "scalar"),
-                },
+                "distribution_cfg": {"class_name": distribution_class, "init_std": policy_cfg["init_noise_std"], "std_type": policy_cfg.get("noise_std_type", "scalar")},
             }
-            cfg["critic"] = {
+            config["critic"] = {
                 "class_name": "frog_rl.models.mlp_model:MLPModel",
                 "hidden_dims": policy_cfg["critic_hidden_dims"],
                 "activation": policy_cfg["activation"],
                 "obs_normalization": policy_cfg["critic_obs_normalization"],
             }
 
-        amp_cfg = cfg["algorithm"].get("amp_cfg")
-        if amp_cfg is not None:
-            state_key = amp_cfg.get("expert_state_key", "amp_state")
-            if state_key not in cfg["obs_groups"]:
-                cfg["obs_groups"][state_key] = [state_key]
-        cfg["algorithm"] = resolve_amp_config(cfg["algorithm"], obs, env)
-        return PPO.construct_algorithm(obs, env, cfg, device)
+        obs_groups = resolve_obs_groups(obs, deepcopy(config.get("obs_groups", {})), ["actor", "critic", state_key])
+        actor_class = resolve_callable(config["actor"].pop("class_name"))
+        critic_class = resolve_callable(config["critic"].pop("class_name"))
+        actor = actor_class(obs, obs_groups, "actor", env.num_actions, **config["actor"]).to(device)
+        critic = critic_class(obs, obs_groups, "critic", 1, **config["critic"]).to(device)
+        storage = RolloutStorage("rl", env.num_envs, config["num_steps_per_env"], obs, [env.num_actions], device)
+        algorithm_cfg.pop("class_name", None)
+        algorithm = AMPPPO(
+            actor,
+            critic,
+            storage,
+            device=device,
+            amp_cfg=amp_cfg,
+            multi_gpu_cfg=config.get("multi_gpu"),
+            **algorithm_cfg,
+        )
+        algorithm.compile(config.get("torch_compile_mode"))
+        return algorithm
 
     def broadcast_parameters(self) -> None:
         """Broadcast actor, critic, discriminator, and AMP normalizer parameters."""
@@ -242,54 +292,3 @@ class AMPPPO(PPO):
             numel = param.numel()
             param.grad.data.copy_(flat_grads[offset : offset + numel].view_as(param.grad.data))
             offset += numel
-
-    def _train_discriminator(self, mini_batch_size: int, loss_dict: dict) -> None:
-        """Train the discriminator on policy and expert transitions."""
-        num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_amp_loss = 0.0
-        mean_grad_pen_loss = 0.0
-        mean_policy_pred = 0.0
-        mean_expert_pred = 0.0
-
-        self.amp_normalizer.train()
-        amp_policy_generator = self.amp_storage.feed_forward_generator(num_updates, mini_batch_size)
-        amp_expert_generator = self.amp_data.feed_forward_generator(num_updates, mini_batch_size)
-
-        for (policy_state, policy_next_state), (expert_state, expert_next_state) in zip(
-            amp_policy_generator, amp_expert_generator
-        ):
-            policy_state_norm = self.amp_normalizer(policy_state)
-            policy_next_state_norm = self.amp_normalizer(policy_next_state)
-            expert_state_norm = self.amp_normalizer(expert_state)
-            expert_next_state_norm = self.amp_normalizer(expert_next_state)
-
-            policy_d = self.discriminator(torch.cat([policy_state_norm, policy_next_state_norm], dim=-1))
-            expert_d = self.discriminator(torch.cat([expert_state_norm, expert_next_state_norm], dim=-1))
-            expert_loss = F.mse_loss(expert_d, torch.ones_like(expert_d))
-            policy_loss = F.mse_loss(policy_d, -torch.ones_like(policy_d))
-            amp_loss = 0.5 * (expert_loss + policy_loss)
-            grad_pen_loss = self.discriminator.compute_gradient_penalty(
-                expert_state_norm, expert_next_state_norm, lambda_=self.grad_pen_coef
-            )
-            loss = amp_loss + grad_pen_loss
-
-            self.discriminator_optimizer.zero_grad()
-            loss.backward()
-            if self.is_multi_gpu:
-                self.reduce_discriminator_parameters()
-            self.discriminator_optimizer.step()
-
-            self.amp_normalizer.update(policy_state.detach())
-            self.amp_normalizer.update(policy_next_state.detach())
-            self.amp_normalizer.update(expert_state.detach())
-            self.amp_normalizer.update(expert_next_state.detach())
-
-            mean_amp_loss += amp_loss.item()
-            mean_grad_pen_loss += grad_pen_loss.item()
-            mean_policy_pred += policy_d.mean().item()
-            mean_expert_pred += expert_d.mean().item()
-
-        loss_dict["amp_loss"] = mean_amp_loss / num_updates
-        loss_dict["amp_grad_pen"] = mean_grad_pen_loss / num_updates
-        loss_dict["amp_policy_pred"] = mean_policy_pred / num_updates
-        loss_dict["amp_expert_pred"] = mean_expert_pred / num_updates

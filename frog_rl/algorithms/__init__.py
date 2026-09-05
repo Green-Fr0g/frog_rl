@@ -6,10 +6,19 @@
 """Learning algorithms."""
 
 from .ppo import PPO
-from .amp_discriminator import AMPDiscriminator
+from frog_rl.models.amp_discriminator import AMPDiscriminator
 from .amp_ppo import AMPPPO
 from .distillation import Distillation
+from .moe_ppo import MoEPPO
 from .wasabi import WasabiPPO
-from .wasabi_discriminator import WasabiDiscriminator
+from frog_rl.models.wasabi_discriminator import WasabiDiscriminator
 
-__all__ = ["AMPDiscriminator", "AMPPPO", "Distillation", "PPO", "WasabiDiscriminator", "WasabiPPO"]
+__all__ = [
+    "AMPDiscriminator",
+    "AMPPPO",
+    "Distillation",
+    "MoEPPO",
+    "PPO",
+    "WasabiDiscriminator",
+    "WasabiPPO",
+]
