@@ -129,8 +129,8 @@ class Discriminator(nn.Module):
         with torch.no_grad():
             self.eval()
             if normalizer is not None:
-                state = normalizer.normalize_torch(state, self.device)
-                next_state = normalizer.normalize_torch(next_state, self.device)
+                state = normalizer(state)
+                next_state = normalizer(next_state)
 
             d = self.amp_linear(self.trunk(torch.cat([state, next_state], dim=-1)))
             reward = self.amp_reward_coef * torch.clamp(
