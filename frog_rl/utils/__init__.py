@@ -13,7 +13,6 @@ from .utils import (
     store_code_state,
     string_to_callable,
     unpad_trajectories,
-    Normalizer,
 )
 
 __all__ = [
@@ -24,5 +23,4 @@ __all__ = [
     "store_code_state",
     "string_to_callable",
     "unpad_trajectories",
-    "Normalizer",
 ]
