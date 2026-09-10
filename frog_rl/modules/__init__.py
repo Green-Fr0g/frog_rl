@@ -16,6 +16,7 @@ from .symmetry import resolve_symmetry_config
 from .transformer import Transformer
 from .wasabi_discriminator import WasabiDiscriminator
 from .vae import VAE
+from .diffusion_noise import DiffusionNoise
 
 from .discriminator import Discriminator
 
@@ -33,4 +34,5 @@ __all__ = [
     "WasabiDiscriminator",
     "Discriminator",
     "VAE",
+    "DiffusionNoise",
 ]
