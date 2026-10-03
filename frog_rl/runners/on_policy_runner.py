@@ -9,21 +9,14 @@ import os
 import statistics
 import time
 import torch
-import warnings
 from collections import deque
 from tensordict import TensorDict
 
 import frog_rl
 from frog_rl.algorithms import PPO
 from frog_rl.algorithms import AMPPPO
+from frog_rl.algorithms import WasabiPPO
 from frog_rl.env import VecEnv
-from frog_rl.modules import (
-    ActorCritic,
-    ActorCriticMoE,
-    ActorCriticRecurrent,
-    resolve_rnd_config,
-    resolve_symmetry_config,
-)
 from frog_rl.utils import resolve_obs_groups, store_code_state
 
 
@@ -387,49 +380,9 @@ class OnPolicyRunner:
         torch.cuda.set_device(self.gpu_local_rank)
 
     def _construct_algorithm(self, obs: TensorDict) -> PPO:
-        """Construct the actor-critic algorithm."""
+        """Construct the algorithm through its algorithm-specific factory."""
         alg_class = eval(self.alg_cfg["class_name"])
-        if hasattr(alg_class, "construct_algorithm"):
-            return alg_class.construct_algorithm(obs, self.env, self.cfg, self.device, self.multi_gpu_cfg)
-
-        # Resolve RND config
-        self.alg_cfg = resolve_rnd_config(self.alg_cfg, obs, self.cfg["obs_groups"], self.env)
-
-        # Resolve symmetry config
-        self.alg_cfg = resolve_symmetry_config(self.alg_cfg, self.env)
-
-        # Resolve deprecated normalization config
-        if self.cfg.get("empirical_normalization") is not None:
-            warnings.warn(
-                "The `empirical_normalization` parameter is deprecated. Please set `actor_obs_normalization` and "
-                "`critic_obs_normalization` as part of the `policy` configuration instead.",
-                DeprecationWarning,
-            )
-            if self.policy_cfg.get("actor_obs_normalization") is None:
-                self.policy_cfg["actor_obs_normalization"] = self.cfg["empirical_normalization"]
-            if self.policy_cfg.get("critic_obs_normalization") is None:
-                self.policy_cfg["critic_obs_normalization"] = self.cfg["empirical_normalization"]
-
-        # Initialize the policy
-        actor_critic_class = eval(self.policy_cfg.pop("class_name"))
-        actor_critic: ActorCritic | ActorCriticMoE | ActorCriticRecurrent = actor_critic_class(
-            obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
-
-        # Initialize the algorithm
-        alg_class = eval(self.alg_cfg.pop("class_name"))
-        alg: PPO = alg_class(actor_critic, device=self.device, **self.alg_cfg, multi_gpu_cfg=self.multi_gpu_cfg)
-
-        # Initialize the storage
-        alg.init_storage(
-            "rl",
-            self.env.num_envs,
-            self.num_steps_per_env,
-            obs,
-            [self.env.num_actions],
-        )
-
-        return alg
+        return alg_class.construct_algorithm(obs, self.env, self.cfg, self.device, self.multi_gpu_cfg)
 
     def _prepare_logging_writer(self) -> None:
         """Prepare the logging writers."""

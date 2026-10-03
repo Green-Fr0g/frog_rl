@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Literal
 
 import torch
@@ -10,9 +11,11 @@ from tensordict import TensorDict
 
 from frog_rl.algorithms.ppo import PPO
 from frog_rl.env import VecEnv
+from frog_rl.modules.rnd import resolve_rnd_config
+from frog_rl.modules.symmetry import resolve_symmetry_config
 from frog_rl.networks import EmpiricalNormalization
-from frog_rl.storage.wasabi_storage import WasabiStorage
-from frog_rl.utils import resolve_optimizer, string_to_callable
+from frog_rl.storage.rollout_storage_wasabi import WasabiStorage
+from frog_rl.utils import resolve_obs_groups, resolve_optimizer, string_to_callable
 
 
 LossType = Literal["BCEWithLogitsLoss", "MSELoss", "WassersteinLoss"]
@@ -24,15 +27,13 @@ class WasabiPPO(PPO):
 
     def __init__(
         self,
-        actor,
-        critic,
-        storage,
+        policy,
         device: str = "cpu",
         multi_gpu_cfg: dict | None = None,
         wasabi_cfg: dict | None = None,
         **kwargs,
     ) -> None:
-        super().__init__(actor, critic, storage, device=device, multi_gpu_cfg=multi_gpu_cfg, **kwargs)
+        super().__init__(policy, device=device, multi_gpu_cfg=multi_gpu_cfg, **kwargs)
         if wasabi_cfg is None:
             raise ValueError("WasabiPPO requires an algorithm.wasabi_cfg configuration.")
 
@@ -49,7 +50,12 @@ class WasabiPPO(PPO):
         self.trunk_weight_decay = float(self.wasabi_cfg["wasabi_trunk_weight_decay"])
         self.head_weight_decay = float(self.wasabi_cfg["wasabi_head_weight_decay"])
 
-        discriminator_class = string_to_callable(self.wasabi_cfg.get("wasabi_discriminator_class_name", "WasabiDiscriminator"))
+        discriminator_class_name = self.wasabi_cfg.get(
+            "wasabi_discriminator_class_name", "frog_rl.modules.wasabi_discriminator:WasabiDiscriminator"
+        )
+        if ":" not in discriminator_class_name:
+            discriminator_class_name = f"frog_rl.modules.wasabi_discriminator:{discriminator_class_name}"
+        discriminator_class = string_to_callable(discriminator_class_name)
         discriminator_kwargs = dict(self.wasabi_cfg.get("wasabi_discriminator_kwargs", {}))
         discriminator_kwargs.pop("state_dim", None)
         self.discriminator = discriminator_class(
@@ -68,11 +74,25 @@ class WasabiPPO(PPO):
         discriminator_optimizer_kwargs.setdefault("lr", self.wasabi_cfg["wasabi_discriminator_lr"])
         self.discriminator_optimizer = optimizer_class(self.discriminator.parameters(), **discriminator_optimizer_kwargs)
 
-        self.wasabi_storage = WasabiStorage(
-            storage.num_transitions_per_env, storage.num_envs, self.wasabi_cfg["state_dim"], device
-        )
+        self.wasabi_storage: WasabiStorage | None = None
         self.current_state: torch.Tensor | None = None
         self.reference_state: torch.Tensor | None = None
+
+    def init_storage(
+        self,
+        training_type: str,
+        num_envs: int,
+        num_transitions_per_env: int,
+        obs: TensorDict,
+        actions_shape: tuple[int] | list[int],
+    ) -> None:
+        super().init_storage(training_type, num_envs, num_transitions_per_env, obs, actions_shape)
+        self.wasabi_storage = WasabiStorage(
+            num_transitions_per_env,
+            num_envs,
+            self.wasabi_cfg["state_dim"],
+            self.device,
+        )
 
     def act(self, obs: TensorDict) -> torch.Tensor:
         """Capture discriminator inputs from the pre-action observation."""
@@ -87,6 +107,8 @@ class WasabiPPO(PPO):
         if self.current_state is None or self.reference_state is None:
             raise RuntimeError("WasabiPPO.process_env_step() must be called after act().")
 
+        if self.wasabi_storage is None:
+            raise RuntimeError("WasabiPPO storage has not been initialized.")
         self.wasabi_storage.add(self.current_state, self.reference_state, dones)
         imitation_reward, _ = self.discriminator.reward(self.current_state, self.reward_type, self.reward_coef)
         rewards = self.task_reward_weight * rewards + imitation_reward.reshape_as(rewards)
@@ -98,6 +120,8 @@ class WasabiPPO(PPO):
         """Run PPO and then optimize the discriminator from the collected rollout."""
         loss_dict = super().update()
 
+        if self.wasabi_storage is None:
+            raise RuntimeError("WasabiPPO storage has not been initialized.")
         if self.wasabi_storage.num_samples == 0:
             self.wasabi_storage.clear()
             return loss_dict
@@ -186,16 +210,16 @@ class WasabiPPO(PPO):
         saved_dict["wasabi_discriminator_optimizer_state_dict"] = self.discriminator_optimizer.state_dict()
         return saved_dict
 
-    def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
+    def load(self, loaded_dict: dict, load_optimizer: bool = True, strict: bool = True) -> bool:
         """Load the discriminator and optimizer in addition to the policy models."""
-        load_iteration = super().load(loaded_dict, load_cfg, strict)
+        load_iteration = super().load(loaded_dict, load_optimizer=load_optimizer, strict=strict)
         discriminator_state = loaded_dict.get("wasabi_discriminator_state_dict") or loaded_dict.get("discriminator")
         if discriminator_state is not None:
             self.discriminator.load_state_dict(discriminator_state, strict=strict)
         optimizer_state = loaded_dict.get("wasabi_discriminator_optimizer_state_dict") or loaded_dict.get(
             "discriminator_optimizer"
         )
-        if optimizer_state is not None:
+        if load_optimizer and optimizer_state is not None:
             self.discriminator_optimizer.load_state_dict(optimizer_state)
         return load_iteration
 
@@ -210,8 +234,10 @@ class WasabiPPO(PPO):
     def construct_algorithm(
         obs: TensorDict, env: VecEnv, cfg: dict, device: str, multi_gpu_cfg: dict | None = None
     ) -> "WasabiPPO":
-        """Resolve WASABI observation keys before constructing PPO components."""
-        wasabi_cfg = cfg["algorithm"].get("wasabi_cfg")
+        """Construct actor-critic, WASABI PPO, and both rollout storages."""
+        alg_cfg = deepcopy(cfg["algorithm"])
+        policy_cfg = deepcopy(cfg["policy"])
+        wasabi_cfg = alg_cfg.pop("wasabi_cfg", None)
         if wasabi_cfg is None:
             raise ValueError("WasabiPPO requires algorithm.wasabi_cfg.")
 
@@ -239,8 +265,39 @@ class WasabiPPO(PPO):
             )
 
         wasabi_cfg["state_dim"] = policy_dim
-        cfg["algorithm"]["wasabi_cfg"] = wasabi_cfg
-        return PPO.construct_algorithm(obs, env, cfg, device, multi_gpu_cfg)
+
+        obs_groups = resolve_obs_groups(
+            obs,
+            deepcopy(cfg.get("obs_groups", {})),
+            ["critic"],
+        )
+        alg_cfg = resolve_rnd_config(alg_cfg, obs, obs_groups, env)
+        alg_cfg = resolve_symmetry_config(alg_cfg, env)
+
+        policy_class = eval(policy_cfg.pop("class_name"))
+        actor_critic = policy_class(
+            obs,
+            obs_groups,
+            env.num_actions,
+            **policy_cfg,
+        ).to(device)
+
+        alg_cfg.pop("class_name", None)
+        algorithm = WasabiPPO(
+            actor_critic,
+            device=device,
+            multi_gpu_cfg=multi_gpu_cfg,
+            wasabi_cfg=wasabi_cfg,
+            **alg_cfg,
+        )
+        algorithm.init_storage(
+            "rl",
+            env.num_envs,
+            cfg["num_steps_per_env"],
+            obs,
+            [env.num_actions],
+        )
+        return algorithm
 
     def reduce_discriminator_parameters(self) -> None:
         """Average discriminator gradients across GPUs."""

@@ -5,10 +5,12 @@
 
 """Implementation of transitions storage for RL-agent."""
 
-from .rollout_storage import RolloutStorage 
+from .rollout_storage import RolloutStorage
 from .rollout_storage_amp import AMPStorage
+from .rollout_storage_wasabi import WasabiStorage
 
 __all__ = [
     "RolloutStorage",
-    "AMPStorage"
-    ]
+    "AMPStorage",
+    "WasabiStorage",
+]
